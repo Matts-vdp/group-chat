@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"bufio"
@@ -8,18 +8,19 @@ import (
 )
 
 // handles a incomming connection
-func handleConnection(conn net.Conn, inch, outch chan string) {
+func handleConnection(conn net.Conn, inch, outch chan string, id int, closeCh chan int) {
 	out := bufio.NewWriter(conn)
 	in := bufio.NewReader(conn)
-	go receiver(in, inch)
+	go receiver(in, inch, id, closeCh)
 	go sender(out, outch)
 }
 
 // processes any incoming strings from in and sends them on channel ch
-func receiver(in *bufio.Reader, ch chan string) {
+func receiver(in *bufio.Reader, ch chan string, id int, closeCh chan int) {
 	for {
 		str, err := in.ReadString(';')
 		if err != nil {
+			closeCh <- id
 			return
 		}
 		str = strings.Trim(str, "\n")
@@ -43,14 +44,20 @@ func sender(out *bufio.Writer, ch chan string) {
 
 // broadcast all incoming strings on the ch channel to all registered outputs
 // the newOut channel can be used to add channels to the registered outputs
-func broadcast(newOut chan chan string) chan string {
+func broadcast(newOut chan chan string) (chan string, chan int) {
 	ch := make(chan string)
-	outputs := make([]chan string, 0)
+	closeCh := make(chan int)
+	outputs := make(map[int]chan string)
 	go func() {
+		i := 0
 		for {
 			select {
 			case new := <-newOut:
-				outputs = append(outputs, new)
+				outputs[i] = new
+				i++
+			case id := <-closeCh:
+				fmt.Println("client " + fmt.Sprintf("%d", id) + " disconnected")
+				delete(outputs, id)
 			case str := <-ch:
 				for _, out := range outputs {
 					out <- str
@@ -58,21 +65,18 @@ func broadcast(newOut chan chan string) chan string {
 			}
 		}
 	}()
-	return ch
+	return ch, closeCh
 }
 
-const ip = "localhost"
-const port = "5000"
-
-func main() {
-	ln, err := net.Listen("tcp", ip+":"+port)
+func Start(netid string) {
+	ln, err := net.Listen("tcp", netid)
 	if err != nil {
 		fmt.Println("Connection setup failed")
 		return
 	}
 	addBroadcastCh := make(chan chan string)
-	broadcastCh := broadcast(addBroadcastCh)
-	i := 0
+	broadcastCh, closeCh := broadcast(addBroadcastCh)
+	id := 0
 	fmt.Println("started")
 	for {
 		conn, err := ln.Accept()
@@ -80,10 +84,10 @@ func main() {
 			fmt.Println("client failed to connect")
 			continue
 		}
-		fmt.Println("client connected")
-		ch := make(chan string)
-		addBroadcastCh <- ch
-		handleConnection(conn, broadcastCh, ch)
-		i++
+		fmt.Println("client " + fmt.Sprintf("%d", id) + " connected")
+		outch := make(chan string)
+		addBroadcastCh <- outch
+		handleConnection(conn, broadcastCh, outch, id, closeCh)
+		id++
 	}
 }
